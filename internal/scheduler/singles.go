@@ -1,6 +1,8 @@
 package scheduler
 
 import (
+	"sort"
+
 	"keep-swinging-web/internal/session"
 )
 
@@ -50,9 +52,67 @@ func singlesMexicanoTopVsBottomScore(games map[string]int, lu SinglesLineup) int
 	return sum*1000 - diff
 }
 
+// pickMexicanoLineupSingles implements fairness-first mexicano pairing for singles.
+func pickMexicanoLineupSingles(eligible []session.Player, matches []session.RecordedMatch, byID map[string]session.Player) (*session.SuggestedMatch, string, error) {
+	sort.SliceStable(eligible, func(i, j int) bool {
+		if eligible[i].GamesPlayed != eligible[j].GamesPlayed {
+			return eligible[i].GamesPlayed < eligible[j].GamesPlayed
+		}
+		return eligible[i].ID < eligible[j].ID
+	})
+
+	minGP := eligible[0].GamesPlayed
+	var fairGroup []session.Player
+	for _, p := range eligible {
+		if p.GamesPlayed == minGP {
+			fairGroup = append(fairGroup, p)
+		} else {
+			break
+		}
+	}
+
+	if len(fairGroup) < 2 {
+		nextGP := fairGroup[len(fairGroup)-1].GamesPlayed + 1
+		for _, p := range eligible {
+			if p.GamesPlayed > minGP && p.GamesPlayed <= nextGP {
+				fairGroup = append(fairGroup, p)
+				if len(fairGroup) >= 2 {
+					break
+				}
+			}
+		}
+	}
+
+	if len(fairGroup) < 2 {
+		return nil, "", ErrNoSinglesLineup
+	}
+
+	if len(matches) == 0 {
+		selected := fairGroup[:2]
+		key := SinglesLineupKey(selected[0].ID, selected[1].ID)
+		return &session.SuggestedMatch{
+			TeamA: []session.Player{selected[0]},
+			TeamB: []session.Player{selected[1]},
+		}, key, nil
+	}
+
+	pts := calculateMexicanoPoints(matches)
+	sort.SliceStable(fairGroup, func(i, j int) bool {
+		return pts[fairGroup[i].ID] > pts[fairGroup[j].ID]
+	})
+
+	selected := fairGroup[:2]
+	key := SinglesLineupKey(selected[0].ID, selected[1].ID)
+
+	return &session.SuggestedMatch{
+		TeamA: []session.Player{selected[0]},
+		TeamB: []session.Player{selected[1]},
+	}, key, nil
+}
+
 // PickSuggestionSingles chooses a singles matchup (1 vs 1):
 // - americano: minimize sum(games_played) — fairness focus.
-// - mexicano: prefer the two most-experienced players facing each other with max GP difference.
+// - mexicano: fairness-first, then leaderboard-based pairing after round 1.
 func PickSuggestionSingles(players []session.Player, matches []session.RecordedMatch, style session.ShufflingStyle, excludeKey string, excludePlayerIDs []string) (*session.SuggestedMatch, string, error) {
 	if style == "" {
 		style = session.ShufflingStyleAmericano
@@ -90,13 +150,15 @@ func PickSuggestionSingles(players []session.Player, matches []session.RecordedM
 		return nil, "", ErrNoSinglesLineup
 	}
 
+	if style == session.ShufflingStyleMexicano {
+		return pickMexicanoLineupSingles(eligible, matches, byID)
+	}
+
 	var bestScore int
 	if style == session.ShufflingStyleMexicanoTopVsTop {
 		bestScore = singlesMexicanoTopVsTopScore(games, candidates[0])
 	} else if style == session.ShufflingStyleMexicanoTopVsBottom {
 		bestScore = singlesMexicanoTopVsBottomScore(games, candidates[0])
-	} else if style == session.ShufflingStyleMexicano {
-		bestScore = singlesFairnessScore(games, candidates[0])
 	} else {
 		bestScore = singlesFairnessScore(games, candidates[0])
 	}
@@ -106,8 +168,6 @@ func PickSuggestionSingles(players []session.Player, matches []session.RecordedM
 			s = singlesMexicanoTopVsTopScore(games, lu)
 		} else if style == session.ShufflingStyleMexicanoTopVsBottom {
 			s = singlesMexicanoTopVsBottomScore(games, lu)
-		} else if style == session.ShufflingStyleMexicano {
-			s = singlesFairnessScore(games, lu)
 		} else {
 			s = singlesFairnessScore(games, lu)
 		}
@@ -123,8 +183,6 @@ func PickSuggestionSingles(players []session.Player, matches []session.RecordedM
 			s = singlesMexicanoTopVsTopScore(games, lu)
 		} else if style == session.ShufflingStyleMexicanoTopVsBottom {
 			s = singlesMexicanoTopVsBottomScore(games, lu)
-		} else if style == session.ShufflingStyleMexicano {
-			s = singlesFairnessScore(games, lu)
 		} else {
 			s = singlesFairnessScore(games, lu)
 		}

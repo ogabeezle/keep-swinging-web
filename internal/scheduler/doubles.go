@@ -47,6 +47,21 @@ func fairnessScore(games map[string]int, lu Lineup) int {
 	return sum
 }
 
+// calculateMexicanoPoints computes individual points from recorded matches.
+// Each player receives the score their team won from each match.
+func calculateMexicanoPoints(matches []session.RecordedMatch) map[string]int {
+	pts := make(map[string]int)
+	for _, m := range matches {
+		for _, id := range m.TeamAIDs {
+			pts[id] += m.ScoreA
+		}
+		for _, id := range m.TeamBIDs {
+			pts[id] += m.ScoreB
+		}
+	}
+	return pts
+}
+
 // mexicanoScore scores lineups for mexicano style:
 // 1. Prefer the 4 least-experienced players (fairness - rotate players in)
 // 2. Among those, prefer splits where the GP difference between teams is maximized (strongest vs weakest)
@@ -111,6 +126,105 @@ func mexicanoTopVsBottomScore(games map[string]int, lu Lineup) int {
 	}
 	
 	return sum*1000 - diff
+}
+
+func pickMexicanoLineup(eligible []session.Player, matches []session.RecordedMatch, byID map[string]session.Player) (*session.SuggestedMatch, string, error) {
+	sort.SliceStable(eligible, func(i, j int) bool {
+		if eligible[i].GamesPlayed != eligible[j].GamesPlayed {
+			return eligible[i].GamesPlayed < eligible[j].GamesPlayed
+		}
+		return eligible[i].ID < eligible[j].ID
+	})
+
+	minGP := eligible[0].GamesPlayed
+	var fairGroup []session.Player
+	for _, p := range eligible {
+		if p.GamesPlayed == minGP {
+			fairGroup = append(fairGroup, p)
+		} else {
+			break
+		}
+	}
+
+	if len(fairGroup) < 4 {
+		for _, p := range eligible {
+			if p.GamesPlayed == minGP {
+				continue
+			}
+			fairGroup = append(fairGroup, p)
+			if len(fairGroup) >= 4 {
+				break
+			}
+		}
+	}
+
+	if len(fairGroup) < 4 {
+		return nil, "", ErrNoLineup
+	}
+
+	if len(matches) == 0 {
+		ids := make([]string, len(fairGroup))
+		for i := range fairGroup {
+			ids[i] = fairGroup[i].ID
+		}
+		
+		var candidates []Lineup
+		eachQuartet(ids, func(q [4]string) {
+			for _, lu := range lineupsForQuartet(q) {
+				candidates = append(candidates, lu)
+			}
+		})
+
+		if len(candidates) == 0 {
+			return nil, "", ErrNoLineup
+		}
+
+		games := gamesMap(fairGroup)
+		var bestScore int
+		for i, lu := range candidates {
+			s := mexicanoScore(games, lu)
+			if i == 0 || s < bestScore {
+				bestScore = s
+			}
+		}
+
+		var best []Lineup
+		for _, lu := range candidates {
+			if mexicanoScore(games, lu) == bestScore {
+				best = append(best, lu)
+			}
+		}
+
+		chosen := best[pickIndex(len(best))]
+		key := LineupKey(chosen.TeamA, chosen.TeamB)
+		
+		buildTeam := func(pair [2]string) []session.Player {
+			return []session.Player{byID[pair[0]], byID[pair[1]]}
+		}
+
+		return &session.SuggestedMatch{
+			TeamA: buildTeam(chosen.TeamA),
+			TeamB: buildTeam(chosen.TeamB),
+		}, key, nil
+	}
+
+	pts := calculateMexicanoPoints(matches)
+	sort.SliceStable(fairGroup, func(i, j int) bool {
+		return pts[fairGroup[i].ID] > pts[fairGroup[j].ID]
+	})
+
+	selected := fairGroup[:4]
+	
+	lu := Lineup{
+		TeamA: [2]string{selected[0].ID, selected[2].ID},
+		TeamB: [2]string{selected[1].ID, selected[3].ID},
+	}
+	key := LineupKey(lu.TeamA, lu.TeamB)
+
+	return &session.SuggestedMatch{
+		TeamA: []session.Player{selected[0], selected[2]},
+		TeamB: []session.Player{selected[1], selected[3]},
+}, key, nil
 }
 
 func eachQuartet(ids []string, yield func([4]string)) {
@@ -290,6 +404,10 @@ func PickSuggestion(players []session.Player, matches []session.RecordedMatch, s
 		return nil, "", ErrNoLineup
 	}
 
+	if style == session.ShufflingStyleMexicano {
+		return pickMexicanoLineup(eligible, matches, byID)
+	}
+
 	if rotated := filterByPartnerRotation(candidates, matches, ids); len(rotated) > 0 {
 		candidates = rotated
 	}
@@ -299,8 +417,6 @@ func PickSuggestion(players []session.Player, matches []session.RecordedMatch, s
 		bestScore = mexicanoTopVsTopScore(games, candidates[0])
 	} else if style == session.ShufflingStyleMexicanoTopVsBottom {
 		bestScore = mexicanoTopVsBottomScore(games, candidates[0])
-	} else if style == session.ShufflingStyleMexicano {
-		bestScore = mexicanoScore(games, candidates[0])
 	} else {
 		bestScore = fairnessScore(games, candidates[0])
 	}
@@ -310,8 +426,6 @@ func PickSuggestion(players []session.Player, matches []session.RecordedMatch, s
 			s = mexicanoTopVsTopScore(games, lu)
 		} else if style == session.ShufflingStyleMexicanoTopVsBottom {
 			s = mexicanoTopVsBottomScore(games, lu)
-		} else if style == session.ShufflingStyleMexicano {
-			s = mexicanoScore(games, lu)
 		} else {
 			s = fairnessScore(games, lu)
 		}
@@ -327,8 +441,6 @@ func PickSuggestion(players []session.Player, matches []session.RecordedMatch, s
 			s = mexicanoTopVsTopScore(games, lu)
 		} else if style == session.ShufflingStyleMexicanoTopVsBottom {
 			s = mexicanoTopVsBottomScore(games, lu)
-		} else if style == session.ShufflingStyleMexicano {
-			s = mexicanoScore(games, lu)
 		} else {
 			s = fairnessScore(games, lu)
 		}
